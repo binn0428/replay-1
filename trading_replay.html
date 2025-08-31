@@ -1,0 +1,1014 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>期貨交易數據回放</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2"></script>
+    <style>
+        body {
+            font-family: 'Microsoft JhengHei', Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #1a1a1a;
+            color: #ffffff;
+        }
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .controls {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 20px;
+            margin-bottom: 30px;
+            padding: 20px;
+            background-color: #2a2a2a;
+            border-radius: 10px;
+        }
+        .chart-container {
+            margin-bottom: 30px;
+            padding: 20px;
+            background-color: #2a2a2a;
+            border-radius: 10px;
+        }
+        .chart-wrapper {
+            position: relative;
+            height: 400px;
+        }
+        button {
+            padding: 10px 20px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        button:disabled {
+            background-color: #666;
+            cursor: not-allowed;
+        }
+        .speed-control {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        input[type="range"] {
+            width: 200px;
+        }
+        .file-input {
+            margin-bottom: 20px;
+        }
+        input[type="file"] {
+            padding: 10px;
+            background-color: #3a3a3a;
+            color: white;
+            border: 1px solid #555;
+            border-radius: 5px;
+        }
+        .status {
+            text-align: center;
+            margin: 10px 0;
+            font-size: 18px;
+        }
+        .progress {
+            width: 100%;
+            height: 10px;
+            background-color: #3a3a3a;
+            border-radius: 5px;
+            overflow: hidden;
+            margin: 10px 0;
+        }
+        .progress-bar {
+            height: 100%;
+            background-color: #4CAF50;
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>期貨交易數據回放系統</h1>
+        </div>
+        
+        <div class="file-input">
+            <input type="file" id="jsonFile" accept=".json" />
+            <button onclick="loadFile()">載入數據</button>
+        </div>
+        
+        <div class="controls">
+            <button id="playBtn" onclick="togglePlay()" disabled>播放</button>
+            <button onclick="resetReplay()" disabled id="resetBtn">重置</button>
+            <div class="speed-control">
+                <label>回放速度:</label>
+                <input type="range" id="speedSlider" min="1" max="10" value="5" />
+                <span id="speedValue">5x</span>
+            </div>
+        </div>
+        
+        <div class="status" id="status">請載入JSON數據文件</div>
+        <div class="progress">
+            <div class="progress-bar" id="progressBar"></div>
+        </div>
+        
+        <div class="chart-container">
+            <h3>圖表一: 期貨指數及買賣力道回放</h3>
+            <div class="chart-wrapper">
+                <canvas id="chart1"></canvas>
+            </div>
+        </div>
+        
+        <div class="chart-container">
+            <h3>圖表二: 結算預估價及加權指數</h3>
+            <div class="chart-wrapper">
+                <canvas id="chart2"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let tradingData = null;
+        let isPlaying = false;
+        let currentIndex = 0;
+        let playInterval = null;
+        let chart1 = null;
+        let chart2 = null;
+        let allTimes = [];
+        let openPrice = null;
+        
+        // 初始化圖表
+        function initCharts() {
+            // 註冊數據標籤插件
+            Chart.register(ChartDataLabels);
+            
+            const ctx1 = document.getElementById('chart1').getContext('2d');
+            const ctx2 = document.getElementById('chart2').getContext('2d');
+            
+            // 圖表一配置
+            chart1 = new Chart(ctx1, {
+                type: 'line',
+                data: {
+                    datasets: [
+                        {
+                            label: '開盤價',
+                            data: [],
+                            borderColor: '#FFD700',
+                            backgroundColor: 'rgba(255, 215, 0, 0.1)',
+                            borderWidth: 3,
+                            fill: false,
+                            tension: 0.1,
+                            pointRadius: 0,
+                            pointHoverRadius: 5
+                        },
+                        {
+                            label: '今高',
+                            data: [],
+                            borderColor: '#FF6B6B',
+                            backgroundColor: 'rgba(255, 107, 107, 0.1)',
+                            borderWidth: 3,
+                            fill: false,
+                            tension: 0.1,
+                            pointRadius: 0,
+                            pointHoverRadius: 5
+                        },
+                        {
+                            label: '今低',
+                            data: [],
+                            borderColor: '#4ECDC4',
+                            backgroundColor: 'rgba(78, 205, 196, 0.1)',
+                            borderWidth: 3,
+                            fill: false,
+                            tension: 0.1,
+                            pointRadius: 0,
+                            pointHoverRadius: 5
+                        },
+                        {
+                            label: '小台指數',
+                            data: [],
+                            borderColor: '#00FF00',
+                            backgroundColor: 'rgba(0, 255, 0, 0.1)',
+                            borderWidth: 3,
+                            fill: false,
+                            tension: 0.1,
+                            pointRadius: 0,
+                            pointHoverRadius: 5,
+                            segment: {
+                                borderColor: function(ctx) {
+                                    if (!window.openPrice) return '#00FF00';
+                                    
+                                    const openPrice = window.openPrice;
+                                    const p0 = ctx.p0.parsed.y;
+                                    const p1 = ctx.p1.parsed.y;
+                                    
+                                    // 高於開盤價顯示紅色，低於開盤價顯示綠色
+                                    if (p0 >= openPrice && p1 >= openPrice) {
+                                        return '#FF0000'; // 紅色 - 高於開盤價
+                                    } else if (p0 < openPrice && p1 < openPrice) {
+                                        return '#00FF00'; // 綠色 - 低於開盤價
+                                    } else {
+                                        // 跨越開盤價時，使用第二個點的顏色
+                                        return p1 >= openPrice ? '#FF0000' : '#00FF00';
+                                    }
+                                },
+                                backgroundColor: function(ctx) {
+                                    if (!window.openPrice) return 'rgba(0, 255, 0, 0.1)';
+                                    
+                                    const openPrice = window.openPrice;
+                                    const p0 = ctx.p0.parsed.y;
+                                    const p1 = ctx.p1.parsed.y;
+                                    
+                                    // 高於開盤價顯示紅色透明，低於開盤價顯示綠色透明
+                                    if (p0 >= openPrice && p1 >= openPrice) {
+                                        return 'rgba(255, 0, 0, 0.1)'; // 紅色透明 - 高於開盤價
+                                    } else if (p0 < openPrice && p1 < openPrice) {
+                                        return 'rgba(0, 255, 0, 0.1)'; // 綠色透明 - 低於開盤價
+                                    } else {
+                                        // 跨越開盤價時，使用第二個點的顏色
+                                        return p1 >= openPrice ? 'rgba(255, 0, 0, 0.1)' : 'rgba(0, 255, 0, 0.1)';
+                                    }
+                                }
+                            }
+                        },
+                        {
+                            label: '買賣差(正值)',
+                            data: [],
+                            borderColor: '#FF69B4',
+                            backgroundColor: 'rgba(255, 105, 180, 0.5)',
+                            borderWidth: 1,
+                            fill: '+1',
+                            tension: 0.1,
+                            pointRadius: 0,
+                            pointHoverRadius: 5
+                        },
+                        {
+                            label: '買賣差(負值)',
+                            data: [],
+                            borderColor: '#32CD32',
+                            backgroundColor: 'rgba(50, 205, 50, 0.5)',
+                            borderWidth: 1,
+                            fill: 0,
+                            tension: 0.1,
+                            pointRadius: 0,
+                            pointHoverRadius: 5
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    layout: {
+                        padding: {
+                            top: 10,
+                            bottom: 30,
+                            left: 10,
+                            right: 10
+                        }
+                    },
+                    plugins: {
+                        legend: {
+                            labels: {
+                                color: '#ffffff'
+                            }
+                        },
+                        datalabels: {
+                            display: function(context) {
+                                // 只在最後一個數據點顯示標籤，但排除買賣差數據集
+                                const dataset = context.dataset;
+                                const dataIndex = context.dataIndex;
+                                
+                                // 如果是買賣差數據集，不顯示標籤
+                                if (dataset.label === '買賣差(正值)' || dataset.label === '買賣差(負值)') {
+                                    return false;
+                                }
+                                
+                                return dataIndex === dataset.data.length - 1;
+                            },
+                            backgroundColor: function(context) {
+                                const dataset = context.dataset;
+                                const dataIndex = context.dataIndex;
+                                
+                                // 只有小台指數使用底色
+                                if (dataset.label === '小台指數' && window.openPrice && dataset.data[dataIndex]) {
+                                    const currentValue = dataset.data[dataIndex].y;
+                                    // 綠色時使用紅色透明底色，紅色時使用綠色透明底色
+                                    return currentValue < window.openPrice ? 'rgba(255, 0, 0, 0.4)' : 'rgba(0, 255, 0, 0.4)';
+                                }
+                                return 'transparent';
+                            },
+                            borderColor: 'transparent',
+                            borderRadius: 4,
+                            borderWidth: 0,
+                            color: function(context) {
+                                const dataset = context.dataset;
+                                const dataIndex = context.dataIndex;
+                                
+                                // 小台指數根據開盤價動態顯示顏色
+                                if (dataset.label === '小台指數' && window.openPrice && dataset.data[dataIndex]) {
+                                    const currentValue = dataset.data[dataIndex].y;
+                                    return currentValue >= window.openPrice ? '#FF0000' : '#00FF00';
+                                }
+                                
+                                return context.dataset.borderColor;
+                            },
+                            font: {
+                                    size: 20,
+                                    weight: 'bold'
+                                },
+                            padding: 2,
+                            formatter: function(value, context) {
+                                if (value && value.y !== undefined) {
+                                    return value.y.toFixed(2);
+                                }
+                                return '';
+                            },
+                            anchor: 'center',
+                            align: 'bottom',
+                            offset: -30
+                        }
+                    },
+                    scales: {
+                        x: {
+                            type: 'time',
+                            time: {
+                                unit: 'minute',
+                                displayFormats: {
+                                    minute: 'HH:mm',
+                                    hour: 'HH:mm'
+                                },
+                                tooltipFormat: 'yyyy-MM-dd HH:mm:ss'
+                            },
+                            display: true,
+                            ticks: {
+                                color: '#ffffff',
+                                maxTicksLimit: 10
+                            },
+                            grid: {
+                                color: '#444444',
+                                display: true
+                            }
+                        },
+                        y: {
+                            type: 'linear',
+                            display: true,
+                            position: 'left',
+                            beginAtZero: false,
+                            title: {
+                                display: true,
+                                text: '價格 (開盤/今高/今低/小台指數/加權指數)',
+                                color: '#ffffff'
+                            },
+                            ticks: {
+                                color: '#ffffff'
+                            },
+                            grid: {
+                                color: '#444444'
+                            }
+                        },
+                        y1: {
+                            type: 'linear',
+                            display: true,
+                            position: 'right',
+                            beginAtZero: true,
+                            title: {
+                                display: true,
+                                text: '買賣差 (相對開盤價)',
+                                color: '#ffffff'
+                            },
+                            ticks: {
+                                color: '#ffffff'
+                            },
+                            grid: {
+                                drawOnChartArea: false,
+                                color: '#666666'
+                            }
+                        }
+                    }
+                }
+            });
+            
+            // 圖表二配置
+            chart2 = new Chart(ctx2, {
+                type: 'line',
+                data: {
+                    datasets: [
+                        {
+                            label: '結算價預估',
+                            data: [],
+                            borderColor: '#FFA500',
+                            backgroundColor: 'rgba(255, 165, 0, 0.1)',
+                            borderWidth: 3,
+                            fill: false,
+                            tension: 0.1,
+                            pointRadius: 0,
+                            pointHoverRadius: 5
+                        },
+                        {
+                            label: '加權指數',
+                            data: [],
+                            borderColor: '#FFFFFF',
+                            backgroundColor: 'rgba(255, 255, 255, 0.1)',
+                            borderWidth: 2,
+                            fill: false,
+                            tension: 0.1,
+                            pointRadius: 0,
+                            pointHoverRadius: 5,
+                            segment: {
+                                borderColor: function(ctx) {
+                                    // 獲取加權指數和結算價預估的數據
+                                    const chart = ctx.chart;
+                                    const settlementDataset = chart.data.datasets[0]; // 結算價預估
+                                    const weightedIndexDataset = chart.data.datasets[1]; // 加權指數
+                                    
+                                    const p0Index = ctx.p0DataIndex;
+                                    const p1Index = ctx.p1DataIndex;
+                                    
+                                    // 確保有對應的結算價預估數據
+                                    if (settlementDataset.data[p1Index] && weightedIndexDataset.data[p1Index]) {
+                                        const settlementValue = settlementDataset.data[p1Index].y;
+                                        const weightedIndexValue = weightedIndexDataset.data[p1Index].y;
+                                        
+                                        // 加權指數大於結算預估值顯示紅色，低於顯示綠色
+                                        return weightedIndexValue > settlementValue ? '#FF0000' : '#00FF00';
+                                    }
+                                    
+                                    return '#FFFFFF'; // 預設白色
+                                },
+                                backgroundColor: function(ctx) {
+                                    // 獲取加權指數和結算價預估的數據
+                                    const chart = ctx.chart;
+                                    const settlementDataset = chart.data.datasets[0]; // 結算價預估
+                                    const weightedIndexDataset = chart.data.datasets[1]; // 加權指數
+                                    
+                                    const p0Index = ctx.p0DataIndex;
+                                    const p1Index = ctx.p1DataIndex;
+                                    
+                                    // 確保有對應的結算價預估數據
+                                    if (settlementDataset.data[p1Index] && weightedIndexDataset.data[p1Index]) {
+                                        const settlementValue = settlementDataset.data[p1Index].y;
+                                        const weightedIndexValue = weightedIndexDataset.data[p1Index].y;
+                                        
+                                        // 加權指數大於結算預估值顯示紅色透明，低於顯示綠色透明
+                                        return weightedIndexValue > settlementValue ? 'rgba(255, 0, 0, 0.1)' : 'rgba(0, 255, 0, 0.1)';
+                                    }
+                                    
+                                    return 'rgba(255, 255, 255, 0.1)'; // 預設白色透明
+                                 }
+                             }
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    layout: {
+                        padding: {
+                            top: 50,
+                            bottom: 10,
+                            left: 10,
+                            right: 45
+                        }
+                    },
+                    plugins: {
+                        legend: {
+                            labels: {
+                                color: '#ffffff'
+                            }
+                        },
+                        datalabels: {
+                            display: function(context) {
+                                // 只在最後一個數據點顯示標籤
+                                const dataset = context.dataset;
+                                const dataIndex = context.dataIndex;
+                                return dataIndex === dataset.data.length - 1;
+                            },
+                            backgroundColor: function(context) {
+                                const dataset = context.dataset;
+                                const dataIndex = context.dataIndex;
+                                
+                                // 只有加權指數使用底色
+                                if (dataset.label === '加權指數') {
+                                    const chart = context.chart;
+                                    const settlementDataset = chart.data.datasets[0]; // 結算價預估
+                                    const weightedIndexDataset = chart.data.datasets[1]; // 加權指數
+                                    
+                                    if (settlementDataset.data[dataIndex] && weightedIndexDataset.data[dataIndex]) {
+                                        const settlementValue = settlementDataset.data[dataIndex].y;
+                                        const weightedIndexValue = weightedIndexDataset.data[dataIndex].y;
+                                        
+                                        // 綠色時使用紅色透明底色，紅色時使用綠色透明底色
+                                        return weightedIndexValue <= settlementValue ? 'rgba(255, 0, 0, 0.4)' : 'rgba(0, 255, 0, 0.4)';
+                                    }
+                                    return 'rgba(255, 255, 255, 0.8)';
+                                }
+                                return 'transparent';
+                            },
+                            borderColor: 'transparent',
+                            borderRadius: 4,
+                            borderWidth: 0,
+                            color: function(context) {
+                                const dataset = context.dataset;
+                                const dataIndex = context.dataIndex;
+                                
+                                // 加權指數根據結算價預估動態顯示顏色
+                                if (dataset.label === '加權指數') {
+                                    const chart = context.chart;
+                                    const settlementDataset = chart.data.datasets[0]; // 結算價預估
+                                    const weightedIndexDataset = chart.data.datasets[1]; // 加權指數
+                                    
+                                    if (settlementDataset.data[dataIndex] && weightedIndexDataset.data[dataIndex]) {
+                                        const settlementValue = settlementDataset.data[dataIndex].y;
+                                        const weightedIndexValue = weightedIndexDataset.data[dataIndex].y;
+                                        
+                                        return weightedIndexValue > settlementValue ? '#FF0000' : '#00FF00';
+                                    }
+                                }
+                                
+                                return context.dataset.borderColor;
+                            },
+                            font: {
+                                    size: 20,
+                                    weight: 'bold'
+                                },
+                            padding: 2,
+                            formatter: function(value, context) {
+                                if (value && value.y !== undefined) {
+                                    return value.y.toFixed(2);
+                                }
+                                return '';
+                            },
+                            anchor: 'center',
+                            align: 'bottom',
+                            offset: -30
+                        }
+                    },
+                    scales: {
+                        x: {
+                            type: 'time',
+                            time: {
+                                unit: 'minute',
+                                displayFormats: {
+                                    minute: 'HH:mm',
+                                    hour: 'HH:mm'
+                                },
+                                tooltipFormat: 'yyyy-MM-dd HH:mm:ss'
+                            },
+                            display: true,
+                            ticks: {
+                                color: '#ffffff',
+                                maxTicksLimit: 10
+                            },
+                            grid: {
+                                color: '#444444',
+                                display: true
+                            }
+                        },
+                        y: {
+                            type: 'linear',
+                            display: true,
+                            position: 'left',
+                            beginAtZero: false,
+                            title: {
+                                display: true,
+                                text: '價格',
+                                color: '#ffffff'
+                            },
+                            ticks: {
+                                color: '#ffffff'
+                            },
+                            grid: {
+                                color: '#444444'
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        
+        // 載入文件
+        function loadFile() {
+            const fileInput = document.getElementById('jsonFile');
+            const file = fileInput.files[0];
+            
+            if (!file) {
+                alert('請選擇一個JSON文件');
+                return;
+            }
+            
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                try {
+                    tradingData = JSON.parse(e.target.result);
+                    processData();
+                    document.getElementById('playBtn').disabled = false;
+                    document.getElementById('resetBtn').disabled = false;
+                    document.getElementById('status').textContent = '數據載入完成，可以開始回放';
+                } catch (error) {
+                    alert('JSON文件格式錯誤: ' + error.message);
+                }
+            };
+            reader.readAsText(file);
+        }
+        
+        // 處理數據
+        function processData() {
+            if (!tradingData) return;
+            
+            console.log('Processing data:', Object.keys(tradingData));
+            
+            // 收集所有時間點
+            const timeSet = new Set();
+            Object.keys(tradingData).forEach(key => {
+                if (tradingData[key] && tradingData[key].times) {
+                    tradingData[key].times.forEach(time => timeSet.add(time));
+                }
+            });
+            
+            allTimes = Array.from(timeSet).sort((a, b) => {
+                // 確保時間排序正確
+                const timeA = new Date(a).getTime();
+                const timeB = new Date(b).getTime();
+                return timeA - timeB;
+            });
+            
+            console.log('Total time points:', allTimes.length);
+            console.log('First few times:', allTimes.slice(0, 5));
+            
+            // 設置開盤價
+            if (tradingData['開盤價'] && tradingData['開盤價'].values && tradingData['開盤價'].values.length > 0) {
+                openPrice = tradingData['開盤價'].values[0];
+                window.openPrice = openPrice; // 設置全局變量供segment函數使用
+                console.log('Opening price:', openPrice);
+            }
+            
+            resetReplay();
+        }
+        
+        // 獲取指定時間的數據值
+        function getValueAtTime(dataKey, targetTime) {
+            if (!tradingData[dataKey] || !tradingData[dataKey].times) return null;
+            
+            const times = tradingData[dataKey].times;
+            const values = tradingData[dataKey].values;
+            
+            // 找到最接近的時間點
+            let closestIndex = -1;
+            for (let i = 0; i < times.length; i++) {
+                if (times[i] <= targetTime) {
+                    closestIndex = i;
+                } else {
+                    break;
+                }
+            }
+            
+            return closestIndex >= 0 ? values[closestIndex] : null;
+        }
+        
+        // 更新圖表 - 累積顯示所有數據點
+        function updateCharts() {
+            if (!tradingData || currentIndex >= allTimes.length) return;
+            
+            console.log('Updating charts with cumulative data up to index:', currentIndex);
+            
+            // 檢查當前時間是否為13:00或之後（僅針對圖表二）
+            const currentTime = allTimes[currentIndex];
+            const currentTimeObj = new Date(currentTime);
+            const currentHour = currentTimeObj.getHours();
+            const currentMinute = currentTimeObj.getMinutes();
+            const isAfter1300 = currentHour > 13 || (currentHour === 13 && currentMinute >= 0);
+            
+            // 如果是13:00或之後，找到13:00的索引位置（僅用於圖表二）
+            let chart2StartIndex = 0;
+            if (isAfter1300) {
+                // 找到13:00的索引位置
+                for (let i = 0; i < allTimes.length; i++) {
+                    const timeObj = new Date(allTimes[i]);
+                    const hour = timeObj.getHours();
+                    const minute = timeObj.getMinutes();
+                    if (hour === 13 && minute === 0) {
+                        chart2StartIndex = i;
+                        break;
+                    } else if (hour > 13 || (hour === 13 && minute > 0)) {
+                        chart2StartIndex = i;
+                        break;
+                    }
+                }
+            }
+            
+            // 清空當前數據
+            chart1.data.datasets[0].data = []; // 開盤價
+            chart1.data.datasets[1].data = []; // 今高
+            chart1.data.datasets[2].data = []; // 今低
+            chart1.data.datasets[3].data = []; // 小台指數
+            chart1.data.datasets[4].data = []; // 買賣差(正值)
+            chart1.data.datasets[5].data = []; // 買賣差(負值)
+            
+            chart2.data.datasets[0].data = []; // 結算價預估
+            chart2.data.datasets[1].data = []; // 加權指數
+            
+            // 圖表一：累積顯示從開始到當前時間點的所有數據（不變動）
+            for (let i = 0; i <= currentIndex; i++) {
+                const currentTime = allTimes[i];
+                
+                // 確保時間戳正確轉換
+                let timePoint;
+                if (typeof currentTime === 'string') {
+                    timePoint = new Date(currentTime);
+                } else if (typeof currentTime === 'number') {
+                    timePoint = new Date(currentTime);
+                } else {
+                    timePoint = new Date();
+                }
+                
+                // 檢查時間是否有效
+                if (isNaN(timePoint.getTime())) {
+                    console.warn('Invalid time:', currentTime);
+                    continue;
+                }
+                
+                console.log(`Processing time ${i}: ${currentTime}, converted to: ${timePoint}`);
+                
+                // 更新圖表一
+                const openValue = getValueAtTime('開盤價', currentTime);
+                const highValue = getValueAtTime('今高', currentTime);
+                const lowValue = getValueAtTime('今低', currentTime);
+                const miniValue = getValueAtTime('小台指數', currentTime);
+                const spreadValue = getValueAtTime('買賣差', currentTime);
+                // 圖表一不處理加權指數
+                // const weightedValue = getValueAtTime('加權指數', currentTime);
+                
+                console.log(`Values at time ${currentTime}:`, {
+                    open: openValue,
+                    high: highValue,
+                    low: lowValue,
+                    mini: miniValue,
+                    spread: spreadValue
+                    // weighted: weightedValue // 圖表一不顯示加權指數
+                });
+                
+                if (openValue !== null) {
+                    chart1.data.datasets[0].data.push({x: timePoint, y: openValue});
+                }
+                if (highValue !== null) {
+                    chart1.data.datasets[1].data.push({x: timePoint, y: highValue});
+                }
+                if (lowValue !== null) {
+                    chart1.data.datasets[2].data.push({x: timePoint, y: lowValue});
+                }
+                if (miniValue !== null) {
+                    chart1.data.datasets[3].data.push({x: timePoint, y: miniValue});
+                }
+                if (spreadValue !== null && openPrice !== null) {
+                    // 買賣差河流圖：正值粉紅色向上，負值綠色向下，以開盤價為基準
+                    // 放大3倍顯示
+                    const amplifiedSpreadValue = spreadValue * 3;
+                    
+                    // 根據買賣差正負值決定顯示顏色
+                    if (spreadValue >= 0) {
+                        // 正值：粉紅色向上填充，綠色在基準線
+                        chart1.data.datasets[4].data.push({x: timePoint, y: openPrice + amplifiedSpreadValue});
+                        chart1.data.datasets[5].data.push({x: timePoint, y: openPrice});
+                    } else {
+                        // 負值：粉紅色不顯示，只有綠色從開盤價填充到負值位置
+                        chart1.data.datasets[4].data.push({x: timePoint, y: null});
+                        chart1.data.datasets[5].data.push({x: timePoint, y: openPrice + amplifiedSpreadValue});
+                    }
+                }
+                // 圖表一不顯示加權指數
+                // if (weightedValue !== null) {
+                //     chart1.data.datasets[6].data.push({x: timePoint, y: weightedValue});
+                // }
+            }
+            
+            // 圖表二：根據13:00規則單獨處理
+            const chart2DisplayStartIndex = isAfter1300 ? chart2StartIndex : 0;
+            for (let i = chart2DisplayStartIndex; i <= currentIndex; i++) {
+                const currentTime = allTimes[i];
+                
+                // 確保時間戳正確轉換
+                let timePoint;
+                if (typeof currentTime === 'string') {
+                    timePoint = new Date(currentTime);
+                } else if (typeof currentTime === 'number') {
+                    timePoint = new Date(currentTime);
+                } else {
+                    timePoint = new Date();
+                }
+                
+                // 檢查時間是否有效
+                if (isNaN(timePoint.getTime())) {
+                    console.warn('Invalid time:', currentTime);
+                    continue;
+                }
+                
+                // 更新圖表二
+                const settlementValue = getValueAtTime('結算價預估', currentTime);
+                const weighted2Value = getValueAtTime('加權指數', currentTime);
+                
+                if (settlementValue !== null) {
+                    chart2.data.datasets[0].data.push({x: timePoint, y: settlementValue});
+                }
+                if (weighted2Value !== null) {
+                    chart2.data.datasets[1].data.push({x: timePoint, y: weighted2Value});
+                }
+            }
+            
+            // 動態設置顏色（基於最新數據點）
+            const latestTime = allTimes[currentIndex];
+            const latestMiniValue = getValueAtTime('小台指數', latestTime);
+            const latestSettlementValue = getValueAtTime('結算價預估', latestTime);
+            const latestWeighted2Value = getValueAtTime('加權指數', latestTime);
+            const latestSpreadValue = getValueAtTime('買賣差', latestTime);
+            
+            // 小台指數顏色現在由segment styling自動處理，不需要手動設置
+            
+            // 買賣差顏色現在由segment styling自動處理，不需要手動設置
+            
+            // 加權指數顏色現在由segment styling自動處理，不需要手動設置
+            
+            console.log('Chart1 datasets after update:', chart1.data.datasets.map(d => ({label: d.label, dataLength: d.data.length})));
+            console.log('Chart2 datasets after update:', chart2.data.datasets.map(d => ({label: d.label, dataLength: d.data.length})));
+            
+            chart1.update('none');
+            chart2.update('none');
+            
+            // 更新進度條
+            const progress = (currentIndex / allTimes.length) * 100;
+            document.getElementById('progressBar').style.width = progress + '%';
+            
+            // 更新狀態
+            document.getElementById('status').textContent = `回放中: ${latestTime} (${currentIndex + 1}/${allTimes.length})`;
+            
+            // 更新數據顯示
+            updateDataDisplay(latestTime);
+        }
+        
+        // 播放/暫停
+        function togglePlay() {
+            if (isPlaying) {
+                pauseReplay();
+            } else {
+                startReplay();
+            }
+        }
+        
+        // 開始回放
+        function startReplay() {
+            if (!tradingData || currentIndex >= allTimes.length) return;
+            
+            isPlaying = true;
+            document.getElementById('playBtn').textContent = '暫停';
+            
+            const speed = parseInt(document.getElementById('speedSlider').value);
+            const interval = Math.max(50, 500 / speed); // 最小50ms間隔
+            
+            playInterval = setInterval(() => {
+                updateCharts();
+                currentIndex++;
+                
+                if (currentIndex >= allTimes.length) {
+                    pauseReplay();
+                    document.getElementById('status').textContent = '回放完成';
+                }
+            }, interval);
+        }
+        
+        // 暫停回放
+        function pauseReplay() {
+            isPlaying = false;
+            document.getElementById('playBtn').textContent = '播放';
+            if (playInterval) {
+                clearInterval(playInterval);
+                playInterval = null;
+            }
+        }
+        
+        // 重置回放
+        function resetReplay() {
+            pauseReplay();
+            currentIndex = 0;
+            
+            if (chart1) {
+                chart1.data.datasets.forEach(dataset => {
+                    dataset.data = [];
+                });
+                chart1.update();
+            }
+            
+            if (chart2) {
+                chart2.data.datasets.forEach(dataset => {
+                    dataset.data = [];
+                });
+                chart2.update();
+            }
+            
+            document.getElementById('progressBar').style.width = '0%';
+            document.getElementById('status').textContent = tradingData ? '準備回放' : '請載入JSON數據文件';
+            updateDataDisplay(null);
+        }
+        
+        // 更新數據顯示
+        function updateDataDisplay(currentTime) {
+            if (!currentTime || !tradingData) {
+                // 清空顯示
+                return;
+            }
+            
+            // 獲取當前時間點的數據
+            const openValue = getValueAtTime('開盤價', currentTime);
+            const highValue = getValueAtTime('今高', currentTime);
+            const lowValue = getValueAtTime('今低', currentTime);
+            const miniValue = getValueAtTime('小台指數', currentTime);
+            const spreadValue = getValueAtTime('買賣差', currentTime);
+            const weightedValue = getValueAtTime('加權指數', currentTime);
+            const settlementValue = getValueAtTime('結算價預估', currentTime);
+            
+            // 這裡可以添加數據顯示邏輯，例如更新某個顯示面板
+            // 目前暫時留空，因為主要的數據顯示是通過圖表完成的
+        }
+        
+        // 速度控制
+        document.getElementById('speedSlider').addEventListener('input', function() {
+            const speed = this.value;
+            document.getElementById('speedValue').textContent = speed + 'x';
+            
+            if (isPlaying) {
+                pauseReplay();
+                startReplay();
+            }
+        });
+        
+        // 手動進度控制
+        function setupProgressControl() {
+            const progressContainer = document.querySelector('.progress');
+            const progressBar = document.getElementById('progressBar');
+            
+            let isDragging = false;
+            
+            // 點擊進度條跳轉
+            progressContainer.addEventListener('click', function(e) {
+                if (!tradingData || allTimes.length === 0) return;
+                
+                const rect = progressContainer.getBoundingClientRect();
+                const clickX = e.clientX - rect.left;
+                const progressPercent = clickX / rect.width;
+                const newIndex = Math.floor(progressPercent * allTimes.length);
+                
+                currentIndex = Math.max(0, Math.min(newIndex, allTimes.length - 1));
+                updateCharts();
+            });
+            
+            // 拖拽功能
+            progressContainer.addEventListener('mousedown', function(e) {
+                if (!tradingData || allTimes.length === 0) return;
+                
+                isDragging = true;
+                const wasPlaying = isPlaying;
+                if (wasPlaying) pauseReplay();
+                
+                function handleMouseMove(e) {
+                    if (!isDragging) return;
+                    
+                    const rect = progressContainer.getBoundingClientRect();
+                    const dragX = e.clientX - rect.left;
+                    const progressPercent = Math.max(0, Math.min(1, dragX / rect.width));
+                    const newIndex = Math.floor(progressPercent * allTimes.length);
+                    
+                    currentIndex = Math.max(0, Math.min(newIndex, allTimes.length - 1));
+                    updateCharts();
+                }
+                
+                function handleMouseUp() {
+                    isDragging = false;
+                    document.removeEventListener('mousemove', handleMouseMove);
+                    document.removeEventListener('mouseup', handleMouseUp);
+                }
+                
+                document.addEventListener('mousemove', handleMouseMove);
+                document.addEventListener('mouseup', handleMouseUp);
+            });
+            
+            // 添加進度條樣式
+            progressContainer.style.cursor = 'pointer';
+        }
+        
+        // 初始化
+        window.addEventListener('load', function() {
+            initCharts();
+            setupProgressControl();
+        });
+    </script>
+</body>
+</html>
